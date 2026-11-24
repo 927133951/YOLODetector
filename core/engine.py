@@ -108,6 +108,8 @@ class Engine:
         self._meas_t = 0.0       # 上一新帧时刻
         self._g_hist = []        # 最近有效增益样本窗（中位数滤波：单帧毒样本无法鞭甩增益）
         self._g_valid_t = 0.0    # 最近一次有效增益样本时刻（过冲死锁逃逸判据）
+        self._gain_dirty = False  # 增益标定有新收敛值待落盘（检测线程置位，控制线程落盘）
+        self._gain_saved_t = 0.0  # 上次增益落盘时刻（2s节流）
         self._ff_on = [False, False]  # 前馈通道迟滞开关：防检测框噪声让速度在阈值附近反复开关
         self._save_timer = None  # 配置防抖落盘定时器
         self._move_fail_t = 0.0  # 鼠标发送失败日志节流
@@ -235,6 +237,35 @@ class Engine:
             pass
         self._save_timer = None
         self._save()
+    def _persist_gain(self, force=False):
+        """在线标定的收敛增益节流落盘(2s)：下次启动热启动继承，跳过开场收敛期。
+        force=True跳过节流（停止推理/改联动系数时立即写入）。
+        _gain_dirty由检测线程置位、本方法清位——竞态最多多落盘一次，无害"""
+        if not self._gain_dirty:
+            return
+        now = time.perf_counter()
+        if not force and now - self._gain_saved_t < 2.0:
+            return
+        self._gain_saved_t = now
+        self._gain_dirty = False
+        with self.lock:
+            self.cfg["gain_est_saved"] = round(float(self._gain_est), 4)
+        self._save()
+    def _reseed_gain(self):
+        """增益种子选择：优先继承上次会话在线标定的收敛值（热启动跳过开场
+        收敛期，开跑即贴合）；无有效历史（首次运行/值越界）时退回"联动系数"
+        (cam_g)作为起点。样本窗清空，在线自适应从种子继续微调"""
+        saved = 0.0
+        try:
+            saved = float(self.cfg.get("gain_est_saved", 0) or 0)
+        except Exception:
+            saved = 0.0
+        if 0.5 <= saved <= 8.0:
+            self._gain_est = saved
+            self.log(f"[增益] 热启动：继承上次标定值 {saved:.2f}（跳过收敛期）")
+        else:
+            self._gain_est = min(8.0, max(0.5, float(self.cfg.get("cam_g", 2.5) or 2.5)))
+        self._g_hist = []
     def load_model(self, path):
         """切换加载用户选择的ONNX模型（后台线程），完成后更新类别信息"""
         if self.running:
@@ -297,8 +328,8 @@ class Engine:
             return
         self.running = True
         self.state = "运行中"
-        # 初始增益取"联动系数"配置（UI cam_g），在线自适应在其附近修正
-        self._gain_est = min(8.0, max(0.5, float(self.cfg.get("cam_g", 2.5) or 2.5)))
+        # 增益热启动：继承上次会话在线标定的收敛值，跳过开场收敛期
+        self._reseed_gain()
         self._g_err = None
         self._g_t = 0.0
         self._aim = None
@@ -312,7 +343,6 @@ class Engine:
         self._dt_avg = 0.011
         self._meas_dt = 0.012
         self._meas_t = 0.0
-        self._g_hist = []
         self._g_valid_t = 0.0
         self._ff_on = [False, False]
         self.start_ts = time.perf_counter()
@@ -322,6 +352,7 @@ class Engine:
         if not self.running:
             return
         self.running = False
+        self._persist_gain(force=True)   # 会话内收敛的增益立即落盘，下次热启动
         self._cap_closed.wait(timeout=5.0)
         self.state = "空闲"
         self.boxes = []
@@ -650,6 +681,7 @@ class Engine:
                             # 下有效样本持续到达，不会触发。
                             if now - self._g_valid_t > 0.5:
                                 self._gain_est = min(8.0, self._gain_est * 1.02)
+                                self._gain_dirty = True
                         else:
                             g_raw = (((self._g_err[0] + self._v[0] * dt_g) - ex) * ldx +
                                      ((self._g_err[1] + self._v[1] * dt_g) - ey) * ldy) / ln2
@@ -670,6 +702,7 @@ class Engine:
                                                min(0.05 * self._gain_est,
                                                    0.12 * (g_med - self._gain_est)))
                                     self._gain_est = min(8.0, max(0.5, self._gain_est + step))
+                                    self._gain_dirty = True
             self._g_err, self._g_t = (ex, ey), now
             # —— 捕获链路延迟：WGC画面滞后真实世界约1~1.5帧。
             #    自动补偿=0.75帧/刷新率：补偿量大于滞后会超前冲过目标
@@ -726,6 +759,7 @@ class Engine:
             now = time.perf_counter()
             dt = min(max(now - last, 0.0005), 0.02)   # tick时长（异常大步长钳制）
             last = now
+            self._persist_gain()   # 增益收敛值节流落盘(2s)，供下次启动热启动
             # 紧急停止热键：推理中按下立即终止所有控制
             if self.running and key_pressed(int(self.cfg.get("panic_vk", 0x23))):
                 self._force_stop()
@@ -884,6 +918,7 @@ class Engine:
     def _force_stop(self):
         self.running = False
         self._cap_closed.wait(timeout=3.0)
+        self._persist_gain(force=True)   # 紧急停止也保留已收敛的标定值
         self.state = "已停止"
         self.lock_flag = False
         self.log("[热键] 紧急停止已触发")
@@ -1031,6 +1066,9 @@ class Engine:
             # 联动系数调整=重播种自适应增益（在线校准以此为起点继续微调）
             self._gain_est = min(8.0, max(0.5, float(value)))
             self._g_hist = []   # 旧增益样本属于旧灵敏度 regime，全部作废
+            with self.lock:
+                self.cfg["gain_est_saved"] = round(float(self._gain_est), 4)
+            self._save()   # 显式重校准意图立即落盘，防止旧灵敏度下的旧收敛值被热启动继承
         elif key == "monitor":
             self._refresh_hz = _query_refresh_hz(value)
             if self.pipeline is not None and value and \

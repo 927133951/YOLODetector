@@ -61,6 +61,7 @@ DEFAULTS = {
     "deadzone": 2.0, "lock_radius": 15.0,
     "aim_offset_y": 0.0, "fov_radius": 0.0,
     "cam_g": 2.5, "aim_ratio": 0.45,
+    "gain_est_saved": 0.0,   # 上次会话在线标定的收敛增益（0=无有效值，热启动跳过收敛期）
     "aim_enable_name": "F8", "aim_enable_vk": 0x77,
     "nms_iou": 0.45, "crosshair_dx": 0, "crosshair_dy": 0,
     "monitor": None, "win_filter": "", "anti_capture": True,
