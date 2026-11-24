@@ -86,6 +86,7 @@ class Detector:
         self.conf = conf
         self.nms_iou = nms_iou
         self.pipeline = pipeline
+        self.seg = {"stage": 0.0, "run": 0.0, "copy": 0.0, "dec": 0.0}  # 分段耗时EMA(ms)
         self.names = {}
         self.family = "未知"
         preload_cuda_dlls()
@@ -228,11 +229,20 @@ class Detector:
         t0 = time.perf_counter()
         if not getattr(self, "_gpu_io_ready", False):
             self._setup_gpu_io(pipeline)
+        seg = self.seg
         if do_stage:
+            ts = time.perf_counter()
             pipeline.stage()             # Map/线性化/预处理内核/同步 -> blob就绪
+            seg["stage"] = 0.9 * seg["stage"] + 0.1 * (time.perf_counter() - ts) * 1000
+        tr = time.perf_counter()
         self.sess.run_with_iobinding(self._io)
+        seg["run"] = 0.9 * seg["run"] + 0.1 * (time.perf_counter() - tr) * 1000
+        tc = time.perf_counter()
         out = self._io.copy_outputs_to_cpu()[0]
+        seg["copy"] = 0.9 * seg["copy"] + 0.1 * (time.perf_counter() - tc) * 1000
+        td = time.perf_counter()
         dets = self._decode_out(out, pipeline._w, pipeline._h)
+        seg["dec"] = 0.9 * seg["dec"] + 0.1 * (time.perf_counter() - td) * 1000
         return dets, (time.perf_counter() - t0) * 1000
     def _decode_out(self, out, iw, ih):
         dets = []

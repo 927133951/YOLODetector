@@ -8,6 +8,7 @@ import queue
 import ctypes
 import core.config as cfg
 from core import capture_guard
+from core.mouse_backend import key_pressed
 from core.capture import list_monitors
 HOTKEY_NAMES = list(cfg.HOTKEY_VK.keys()) + ["自定义"]
 
@@ -121,7 +122,41 @@ class App:
         self._setup_scroll()
         self._build_ui()
         self._apply_root_guard()
+        self._apply_root_taskbar_hide()   # 主窗口默认不进任务栏/Alt-Tab
+        self._home_prev = False
+        self.root.after(50, self._poll_home_key)   # Home键显隐主界面
         self.root.after(200, self._poll_status)
+    def _apply_root_taskbar_hide(self):
+        """主窗口默认不进任务栏/Alt-Tab（WS_EX_TOOLWINDOW，无勾选项）"""
+        try:
+            hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
+            if hwnd:
+                capture_guard.hide_from_taskbar(hwnd, True)
+        except Exception:
+            pass
+    def _poll_home_key(self):
+        """Home键显示/隐藏主界面（边沿触发，50ms轮询）。
+        焦点在输入框/下拉框内时不触发——Home也是文本编辑键，避免打字误触"""
+        try:
+            hp = key_pressed(0x24)   # VK_HOME
+            if hp and not self._home_prev:
+                w = self.root.focus_get()
+                if not isinstance(w, (tk.Entry, ttk.Entry, ttk.Combobox, tk.Spinbox)):
+                    self._toggle_main_visible()
+            self._home_prev = hp
+        except Exception:
+            pass
+        finally:
+            self.root.after(50, self._poll_home_key)
+    def _toggle_main_visible(self):
+        if self.root.state() == "withdrawn":
+            self.root.deiconify()
+            self.root.lift()
+            self.root.focus_force()
+            self._log("[窗口] 主界面已显示")
+        else:
+            self.root.withdraw()
+            self._log("[窗口] 主界面已隐藏（按Home恢复显示）")
     def _build_style(self):
         self.bg, self.panel, self.fg = "#14161a", "#1d2026", "#e8eaed"
         self.accent, self.dim, self.green = "#00b4ff", "#8b93a1", "#2ecc71"

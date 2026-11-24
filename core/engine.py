@@ -82,6 +82,9 @@ class Engine:
         self.lock = threading.Lock()
         self.running = False
         self.preview_on = False
+        self._pv_hwnd = 0            # 预览窗口句柄（namedWindow后按标题获取）
+        self._preview_hidden = False # 切换键控制的窗口显隐状态
+        self._hide_prev = False      # 显隐切换键边沿检测
         self.detector = None
         self.detector_ready = False
         self.model_error = None
@@ -343,6 +346,7 @@ class Engine:
     def toggle_preview(self, on):
         if on and not self.preview_on:
             self.preview_on = True
+            self._preview_hidden = False   # 窗口重建默认可见
             self.preview_thread = threading.Thread(target=self._preview_loop, daemon=True)
             self.preview_thread.start()
             self.log("[预览] win32预览窗口已开启")
@@ -351,7 +355,22 @@ class Engine:
             if self.preview_thread is not None:
                 self.preview_thread.join(timeout=2.0)
                 self.preview_thread = None
+            self._pv_hwnd = 0
+            self._preview_hidden = False
             self.log("[预览] 预览窗口已关闭")
+    def _toggle_preview_visible(self):
+        """切换键（默认Tab）显隐预览窗口：隐藏=SW_HIDE；恢复=SW_SHOWNA
+        （不激活窗口，不抢游戏焦点）"""
+        hwnd = getattr(self, "_pv_hwnd", 0)
+        if not hwnd:
+            return
+        try:
+            self._preview_hidden = not self._preview_hidden
+            ctypes.windll.user32.ShowWindow(hwnd, 0 if self._preview_hidden else 8)
+            self.log("[预览] 窗口已隐藏（再按切换键恢复显示）" if self._preview_hidden
+                     else "[预览] 窗口已恢复显示")
+        except Exception:
+            pass
     def set_classes(self, ids):
         with self.lock:
             self.cfg["selected_classes"] = set(int(i) for i in ids)
@@ -521,12 +540,14 @@ class Engine:
                 self.log(f"[GPU] 管线故障：{e}——推理已停止")
                 self._force_stop()
                 return
-            # 预览回读：新帧即回读（发布率=捕获源帧率，单层节流——绘制层唯一
-            # 节流在预览线程，两层串联会相位错位、显示间隔抖动=卡顿感）。
+            # 预览回读：新帧即回读，但限频60Hz——readback的CopyResource+Map会
+            # 强制GPU同步，捕获率240Hz时逐帧回读会在热循环里叠加同步开销。
+            # 发布率即预览有效帧率（单层节流语义不变），60fps预览足够流畅。
             # 无新帧500ms兜底（抓帧链路坏死时预览不永久黑屏）
-            if self.preview_on and (new_frame or
-                                    time.perf_counter() - getattr(self, "_pb_t", 0.0) > 0.5):
-                self._pb_t = time.perf_counter()
+            pb_now = time.perf_counter()
+            if self.preview_on and ((new_frame and pb_now - getattr(self, "_pb_t", 0.0) >= 0.0155)
+                                    or pb_now - getattr(self, "_pb_t", 0.0) > 0.5):
+                self._pb_t = pb_now
                 frame = cap.readback()
             else:
                 frame = None
@@ -683,9 +704,11 @@ class Engine:
             if new_frame:
                 self.num_dets = len(dets)
                 self.boxes = dets
-            # 回读失败（Map偶发错）时保留上一帧：预览不出现黑屏跳变
+            # 回读失败（Map偶发错）时保留上一帧：预览不出现黑屏跳变。
+            # readback每次返回全新分配的数组，直接发布引用即可——预览线程在
+            # 旧引用上绘制不影响后续发布（发布只替换引用，不改旧数组内容）
             if self.preview_on and frame is not None:
-                self.frame = frame.copy()
+                self.frame = frame
                 self.frame_seq += 1
         # 检测帧率上限（默认240Hz）：无新帧也持续推理当前纹理（帧率=推理速率），
         # 多应用共享GPU时可在GUI调低省占用
@@ -724,6 +747,14 @@ class Engine:
                 self._aim_vk_prev = pa
             else:
                 self._aim_vk_prev = False
+            # —— 预览窗口显隐切换键（边沿触发，固定Tab；仅预览开启时轮询）——
+            if self.preview_on:
+                hp = key_pressed(0x09)   # VK_TAB
+                if hp and not self._hide_prev:
+                    self._toggle_preview_visible()
+                self._hide_prev = hp
+            else:
+                self._hide_prev = False
             pressed = key_pressed(int(self.cfg.get("vk", 0x06))) and self._window_ok()
             st = self._aim
             # 总开关是硬闸门：关闭时无论触发热键/检测结果如何都不发鼠标位移
@@ -867,6 +898,17 @@ class Engine:
         try:
             cv2.namedWindow(win, cv2.WINDOW_NORMAL)
             cv2.resizeWindow(win, 720, 720)
+            # 任务栏/Alt-Tab隐藏：窗口此时已创建但未显示（首次imshow才显示），
+            # 先找到句柄改好样式再进入绘制循环——任务栏按钮/Alt-Tab项从头不出现
+            hwnd = 0
+            for _ in range(30):          # cv2窗口创建异步可见，重试至多300ms
+                hwnd = capture_guard.find_window(win)
+                if hwnd:
+                    break
+                time.sleep(0.01)
+            if hwnd:
+                self._pv_hwnd = hwnd
+                capture_guard.hide_from_taskbar(hwnd, True)   # 默认行为：不进任务栏/Alt-Tab
             if self.cfg.get("anti_capture"):
                 for _ in range(20):
                     hwnd = capture_guard.find_window(win)
@@ -877,6 +919,12 @@ class Engine:
             drawn_seq = -1
             last_draw = 0.0
             while self.preview_on and self.running:
+                # 隐藏状态（Tab切换）下跳过imshow——HighGUI的imshow内部会
+                # ShowWindow(SW_SHOW)把隐藏的窗口立刻顶回显示
+                if getattr(self, "_preview_hidden", False):
+                    if cv2.waitKey(15) == 27:
+                        break
+                    continue
                 # 锁内先查帧版本号+绘制节流(120fps)：只有"真正新帧且距上次绘制
                 # ≥8ms"才拷贝绘制。无新帧零拷贝不重绘（防WDA_EXCLUDE的DWM排除
                 # 路径闪烁）。纯cv2路径下120fps重绘GIL占用约0，检测线程不受影响。
@@ -886,7 +934,8 @@ class Engine:
                             or now_t - last_draw < 0.008):
                         frame = None
                     else:
-                        frame = self.frame.copy()
+                        # 引用即可：发布数组每帧全新分配，绘制改动不会被复用
+                        frame = self.frame
                         boxes = list(self.boxes)
                         fps, ms, n = self.fps, self.infer_ms, self.num_dets
                         state, mode = self.state, self.capture_mode
@@ -931,6 +980,12 @@ class Engine:
                             f"{state_en.get(state, state)}",
                             (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
                             (240, 240, 240), 1, cv2.LINE_AA)
+                seg = getattr(self.detector, "seg", None)
+                if seg:
+                    cv2.putText(frame, f"stage {seg['stage']:.2f}  run {seg['run']:.2f}  "
+                                f"copy {seg['copy']:.3f}  dec {seg['dec']:.2f} ms",
+                                (8, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
+                                (150, 220, 150), 1, cv2.LINE_AA)
                 shown = cv2.resize(frame, (720, 720), interpolation=cv2.INTER_LINEAR)
                 cv2.imshow(win, shown)
                 if cv2.waitKey(1) == 27:
@@ -942,6 +997,7 @@ class Engine:
                 cv2.destroyWindow(win)
             except cv2.error:
                 pass
+            self._pv_hwnd = 0
             self.preview_on = False
             self.log("[预览] 预览窗口已关闭")
     def get_status(self):
