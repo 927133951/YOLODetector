@@ -694,6 +694,10 @@ class Engine:
                                 (x1, max(14, y1 - 4)), cv2.FONT_HERSHEY_SIMPLEX,
                                 0.45, color, 1, cv2.LINE_AA)
                 cx, cy = w // 2, h // 2
+                # FOV跟随范围圈：圆心=区域中心(=准星)，半径=跟随范围，0=不限不画
+                fov_v = float(self.cfg.get("fov_radius", 0.0) or 0.0)
+                if fov_v > 0:
+                    cv2.circle(frame, (cx, cy), int(fov_v), (60, 255, 60), max(1, thin))
                 cv2.line(frame, (cx - 7 * scale, cy), (cx + 7 * scale, cy), (60, 255, 60), thin)
                 cv2.line(frame, (cx, cy - 7 * scale), (cx, cy + 7 * scale), (60, 255, 60), thin)
                 cv2.putText(frame, f"FPS {fps:.0f} | {ms:.1f}ms | tgt {n} | {mode} | "
