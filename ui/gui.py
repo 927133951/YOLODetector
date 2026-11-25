@@ -60,32 +60,29 @@ class ToolTip:
 
 # —— 滑条参数说明（key → 说明文案）——
 PARAM_TIPS = {
-    "aim_ratio": "移动比例：每帧消除剩余误差的比例(0.1~1.0)。\n"
-                 "越大→跟得越快、越贴框；过大→易在目标框两侧来回摆(过冲)。\n"
-                 "建议0.3~0.45起步；出现过冲/画圈就调小。",
-    "aim_offset_y": "跟随点Y偏移：跟随点在目标框内的垂直位置。\n"
-                    "-0.5=框顶(上沿)  0=正中心  +0.5=框底。\n"
-                    "建议0(最稳)或-0.1~-0.2(略偏上沿)。",
-    "fov_radius": "跟随范围：只跟随准星周围该半径(px)内的目标，0=不限制。\n"
-                  "防止远处目标被选为跟随对象。建议30~80；越大搜索范围越大。",
-    "lock_radius": "跟随判定：误差小于该值(px)时状态栏显示'已跟随'。\n"
-                   "仅状态显示用，不影响跟随力度，保持默认即可。",
     "nms_iou": "NMS IoU：重叠检测框的去重阈值。\n"
                "同一目标出现双重框→调低(0.4)；目标密集互相遮挡漏检→调高(0.5)。",
-    "deadzone": "收尾死区：误差小于该值(px)时停止移动，\n"
-                "防止检测框自身抖动让准星在框内微颤。\n"
-                "建议2~3；过大→末段提前停住。",
-    "cam_g": "联动系数：1个鼠标count对应的屏幕像素数(与游戏灵敏度相关)。\n"
-             "软件会自动校准，收敛值自动持久化——下次启动直接继承，开跑即贴合\n"
-             "不再需要晃几下重新收敛。调整此值=显式重新校准（立即生效并落盘），\n"
-             "仅在自动校准明显不准时微调：鼠标灵敏度高→值调大。",
-    "detect_fps": "检测帧率上限：检测线程每秒推理次数上限(60~240)，默认240。\n"
-                  "调低→GPU占用大幅下降，其他共用GPU的软件更流畅；\n"
-                  "调高→检测更新鲜但GPU占用线性上涨。\n"
-                  "多应用共享GPU时建议≤110，纯游戏场景保持240。",
-    "capture_delay_ms": "延迟补偿(ms)：目标横移时按画面滞后时长外推超前补偿。\n"
-                        "未拖动滑条前=自动(0.75帧/刷新率，60Hz≈12ms)；拖动后为手动值。\n"
-                        "横移目标追不上→调大；出现超前冲过目标→调小。",
+    "detect_fps": "检测帧率上限(60~240)：只对'画面更新'做推理，重复画面自动跳过，\n"
+                  "GPU占用≈游戏实际帧率×单帧耗时，一般保持240即可。\n"
+                  "状态栏'帧率'=画面真实更新率(上限=显示器刷新率)。\n"
+                  "若明显低于刷新率：游戏画质/录制软件/NVIDIA滤镜在抢GPU，先排查它们。",
+    "fov_radius": "跟随范围(FOV)：以准星为中心的圆形区域，仅范围内的目标可选。\n"
+                  "0=不限（全检测区域都可跟随）。混战中被远处目标带偏→调小(80~150)。",
+    "lock_radius": "跟随判定(px)：目标与准星距离小于该值时状态显示'已跟随(LOCKED)'。\n"
+                   "仅状态提示用，不影响实际控制。",
+    "aim_offset_y": "跟随点Y偏移：瞄准框内的位置。-0.5=框顶(爆头线)，0=框中心，+0.5=框底。\n"
+                    "打头调负值，压枪扫射调正值。",
+    "aim_speed": "鼠标速度：<1.0=每帧朝目标走剩余误差的百分比（平滑收敛）。XY轴震动/甩飞就调小，\n"
+                 "吸得慢就调大：建议0.2~0.4；1.0=每帧直满（AimYolo原生，仅低灵敏度游戏稳）。\n"
+                 "多目标/头身双框跳变已由目标锁定迟滞自动抑制，无需调参。",
+    "deadzone": "收尾死区(px)：距离小于该值时不再移动鼠标。\n"
+                "防止在目标附近来回抖动，一般2~3即可。",
+    "sens_k": "视角增益K：鼠标移动1像素时目标在屏幕上反向移动的像素数\n"
+              "（由游戏灵敏度/FOV/分辨率共同决定）。步长=误差/K。\n"
+              "调法：鼠标速度设1.0，从1.0逐步试——一步吸附不回弹即调准\n"
+              "（此时K=游戏真实增益，一步到位零过冲）；\n"
+              "反向过冲甩=K偏小→调大；吸附缓慢=K偏大→调小。\n"
+              "K调不准时把鼠标速度调回0.3，平滑兜底。",
 }
 TIP_CONF = ("置信度阈值：检测结果的把握程度门槛(0.1~0.9)。\n"
             "越高→只选有把握的目标(误检少、可能漏检)；越低→检出更多(易误检、易跳目标)。\n"
@@ -95,21 +92,22 @@ TIP_CAP = ("检测区域：自动锁定为模型输入尺寸（模型按该尺�
 TIP_MON = "选择游戏所在显示器。多显示器必须选对，否则检测到的是另一块屏幕的画面。"
 TIP_OFFSET = ("准星偏移：游戏准星不在屏幕正中心时的手动补偿。X右正左负、Y下正上负(像素)。\n"
               "判断：开启预览后，绿色十字与游戏准星不重合就调这两个值。")
-TIP_STRATEGY = ("目标策略：\n最近中心=优先选距离准星最近的目标(推荐，配合自动选点防翻转)；\n"
-                "最高置信度=优先选画面里最有把握的目标。")
 TIP_ANTI = "防截屏：让本窗口对微信/QQ/OBS等截图、录屏软件不可见，不影响游戏。"
-TIP_BACKEND = ("控制后端：\n罗技驱动DLL=驱动级鼠标移动(推荐，1:1精确，不受系统指针加速影响)；\n"
-               "SendInput=系统级模拟(需系统关闭'提高指针精确度')。")
-TIP_INVERT = "Y轴反向：如果准星上下方向反了(目标在上却往下移)就勾选。"
 TIP_HOTKEY = ("触发热键：按住该键时启用跟随辅助。\n"
               "可选预设键，或选'自定义'输入VK码(十进制，可查虚拟键码表)。")
 TIP_PANIC = "紧急停止：推理中按下立即停止全部鼠标控制。\n失控时的保底手段，建议保持End。"
 TIP_AEN = "跟随辅助开关：按一下在'开启/关闭跟随辅助'之间切换。\n临时想手动操作时用，无需停止推理。"
+TIP_STRATEGY = ("目标策略：'最近中心'=跟随离准星最近的目标（AimYolo原生）；\n"
+                "'最高置信度'=跟随置信度最高的目标。\n"
+                "多目标混战前者更跟手，后者不易被低质量框带偏。")
+TIP_BACKEND = ("鼠标后端：'罗技驱动'=MouseControl.dll驱动级移动（推荐，游戏内更稳）；\n"
+               "'SendInput'=系统级鼠标事件。罗技DLL缺失时自动回退SendInput。\n"
+               "切换后下次开始推理生效。")
+TIP_INVERT = "Y轴反向：跟随移动方向上下反转（仅平滑移动路径有效）。"
 TIP_WIN = ("生效窗口：只在标题包含该关键字的窗口生效，留空=全局生效。\n"
            "建议填游戏窗口标题的一部分(如'Counter')，防止切到桌面/聊天窗口误触发。")
-TIP_RESET = ("一键重置：将检测/跟随调参恢复为通用稳定值\n"
-             "(任何设备、任何刷新率下都不会过冲的保守组合)。\n"
-             "不会改动：热键、显示器、后端、防截屏、准星偏移、捕获区域、已选类别。")
+TIP_RESET = ("一键重置：将检测调参恢复为通用稳定值。\n"
+             "不会改动：热键、显示器、防截屏、准星偏移、捕获区域、已选类别。")
 class App:
     def __init__(self, root, engine):
         self.root = root
@@ -252,17 +250,18 @@ class App:
                                 font=("Microsoft YaHei UI", 10, "bold"))
         self.lbl_cap.grid(row=2, column=1, columnspan=2, sticky="w", **pad)
         self._tip(self.lbl_cap, TIP_CAP)
-        strat_lbl = tk.Label(p1, text="目标策略", bg=self.panel, fg=self.fg,
-                             font=("Microsoft YaHei UI", 10))
-        strat_lbl.grid(row=3, column=0, sticky="w", **pad)
-        self._tip(strat_lbl, TIP_STRATEGY)
-        sf = tk.Frame(p1, bg=self.panel)
-        sf.grid(row=3, column=1, columnspan=2, sticky="w", **pad)
-        self.strategy_var = tk.StringVar(value=self.engine.cfg["strategy"])
-        cb = ttk.Combobox(sf, textvariable=self.strategy_var, values=["最近中心", "最高置信度"],
-                          state="readonly", width=12, font=("Microsoft YaHei UI", 10))
-        cb.pack(side="left")
-        cb.bind("<<ComboboxSelected>>", lambda e: self.engine.update_cfg("strategy", self.strategy_var.get()))
+        str_lbl = tk.Label(p1, text="目标策略", bg=self.panel, fg=self.fg,
+                           font=("Microsoft YaHei UI", 10))
+        str_lbl.grid(row=3, column=0, sticky="w", **pad)
+        self._tip(str_lbl, TIP_STRATEGY)
+        self.strategy_var = tk.StringVar(
+            value=str(self.engine.cfg.get("strategy", "最近中心")))
+        self.str_cb = ttk.Combobox(p1, textvariable=self.strategy_var,
+                                   values=["最近中心", "最高置信度"], state="readonly",
+                                   width=30, font=("Microsoft YaHei UI", 10))
+        self.str_cb.grid(row=3, column=1, columnspan=2, sticky="w", **pad)
+        self._tip(self.str_cb, TIP_STRATEGY)
+        self.str_cb.bind("<<ComboboxSelected>>", self._strategy_changed)
         anti_lbl = tk.Label(p1, text="防截屏捕获", bg=self.panel, fg=self.fg,
                             font=("Microsoft YaHei UI", 10))
         anti_lbl.grid(row=4, column=0, sticky="w", **pad)
@@ -358,27 +357,29 @@ class App:
         # —— 鼠标设置 ——
         p3 = self._panel()
         p3.pack(fill="x", padx=14, pady=4)
-        self._title_label(p3, "── 鼠标设置").grid(row=0, column=0, columnspan=2, sticky="w", **pad)
-        be_lbl = tk.Label(p3, text="控制后端", bg=self.panel, fg=self.fg,
+        self._title_label(p3, "── 鼠标设置").grid(row=0, column=0, columnspan=3, sticky="w", **pad)
+        be_lbl = tk.Label(p3, text="鼠标后端", bg=self.panel, fg=self.fg,
                           font=("Microsoft YaHei UI", 10))
         be_lbl.grid(row=1, column=0, sticky="w", **pad)
         self._tip(be_lbl, TIP_BACKEND)
         bf = tk.Frame(p3, bg=self.panel)
-        bf.grid(row=1, column=1, sticky="w", **pad)
-        self.backend_var = tk.StringVar(value="罗技驱动DLL" if self.engine.cfg["backend"] == "logitech" else "SendInput")
-        for text, mode in (("罗技驱动DLL", "logitech"), ("SendInput", "sendinput")):
-            tk.Radiobutton(bf, text=text, variable=self.backend_var, value=text, bg=self.panel,
-                           fg=self.fg, selectcolor="#22262e", activebackground=self.panel,
-                           activeforeground=self.fg, highlightthickness=0, bd=0,
-                           font=("Microsoft YaHei UI", 10),
-                           command=self._backend_changed).pack(side="left", padx=(0, 12))
-        self.invert_var = tk.BooleanVar(value=self.engine.cfg["invert_y"])
-        inv_cb = tk.Checkbutton(bf, text="Y轴反向(方向相反时勾选)", variable=self.invert_var,
-                                bg=self.panel, fg=self.dim, selectcolor="#22262e",
-                                activebackground=self.panel, activeforeground=self.fg,
-                                highlightthickness=0, bd=0, font=("Microsoft YaHei UI", 9),
-                                command=lambda: self.engine.update_cfg("invert_y", self.invert_var.get()))
-        inv_cb.pack(side="left", padx=(8, 0))
+        bf.grid(row=1, column=1, columnspan=2, sticky="w", **pad)
+        self.backend_var = tk.StringVar(value=str(self.engine.cfg.get("backend", "logitech")))
+        for text, val in (("罗技驱动（MouseControl.dll）", "logitech"),
+                          ("SendInput（系统事件）", "sendinput")):
+            tk.Radiobutton(bf, text=text, value=val, variable=self.backend_var,
+                           bg=self.panel, fg=self.dim, selectcolor="#22262e",
+                           activebackground=self.panel, activeforeground=self.fg,
+                           highlightthickness=0, bd=0, font=("Microsoft YaHei UI", 9),
+                           command=self._backend_changed).pack(side="left", padx=(0, 14))
+        self.inv_var = tk.BooleanVar(value=bool(self.engine.cfg.get("invert_y", False)))
+        inv_cb = tk.Checkbutton(p3, text="Y轴反向（仅平滑移动路径有效）",
+                                variable=self.inv_var, bg=self.panel, fg=self.dim,
+                                selectcolor="#22262e", activebackground=self.panel,
+                                activeforeground=self.fg, highlightthickness=0, bd=0,
+                                font=("Microsoft YaHei UI", 9),
+                                command=self._invert_changed)
+        inv_cb.grid(row=2, column=1, columnspan=2, sticky="w", **pad)
         self._tip(inv_cb, TIP_INVERT)
         # —— 热键与控制参数 ——
         p4 = self._panel()
@@ -450,11 +451,11 @@ class App:
         tk.Label(wf, text="仅游戏窗口生效（标题包含关键字），留空=全局", bg=self.panel, fg=self.dim,
                  font=("Microsoft YaHei UI", 9)).pack(side="left", padx=(10, 0))
         params = (
-            ("移动比例", "aim_ratio", 0.1, 1.0, 0.05, 0), ("跟随点Y偏移", "aim_offset_y", -0.5, 0.5, 0.05, 1),
-            ("跟随范围(px)", "fov_radius", 0.0, 160.0, 5.0, 0), ("跟随判定(px)", "lock_radius", 5.0, 40.0, 1.0, 1),
-            ("NMS IoU", "nms_iou", 0.3, 0.7, 0.05, 0), ("收尾死区(px)", "deadzone", 1.0, 6.0, 0.5, 1),
-            ("联动系数", "cam_g", 1.0, 6.0, 0.1, 0), ("检测帧率上限", "detect_fps", 60.0, 240.0, 10.0, 1),
-            ("延迟补偿(ms)", "capture_delay_ms", 0.0, 80.0, 5.0, 0),
+            ("NMS IoU", "nms_iou", 0.3, 0.7, 0.05, 0), ("检测帧率上限", "detect_fps", 60.0, 240.0, 10.0, 1),
+            ("跟随范围(px)", "fov_radius", 0.0, 300.0, 5.0, 0), ("跟随判定(px)", "lock_radius", 5.0, 40.0, 1.0, 1),
+            ("跟随点Y偏移", "aim_offset_y", -0.5, 0.5, 0.05, 0), ("鼠标速度", "aim_speed", 0.1, 1.0, 0.05, 1),
+            ("收尾死区(px)", "deadzone", 1.0, 6.0, 0.5, 0),
+            ("视角增益K", "sens_k", 0.5, 6.0, 0.05, 1),
         )
         self._param_vars = {}
         for i, (text, key, frm, to, res, col) in enumerate(params):
@@ -662,6 +663,17 @@ class App:
         idx = self.capm_names.index(self.capm_var.get())
         self.engine.update_cfg("capture_method", self.capm_keys[idx])
         self._log(f"[捕获] 捕获方式已切换：{self.capm_var.get()}（下次推理生效）")
+    def _strategy_changed(self, event=None):
+        val = self.strategy_var.get()
+        self.engine.update_cfg("strategy", val)
+        self._log(f"[跟随] 目标策略已切换：{val}")
+    def _backend_changed(self, event=None):
+        val = self.backend_var.get()
+        self.engine.update_cfg("backend", val)
+        self._log(f"[鼠标] 后端已切换：{'罗技驱动' if val == 'logitech' else 'SendInput'}（下次推理生效）")
+    def _invert_changed(self, event=None):
+        self.engine.update_cfg("invert_y", bool(self.inv_var.get()))
+        self._log(f"[鼠标] Y轴反向：{'开' if self.inv_var.get() else '关'}")
     def _spin_changed(self, key, var):
         try:
             val = int(var.get())
@@ -708,35 +720,26 @@ class App:
         self.engine.update_cfg("aim_enable_vk", vk)
     def _win_changed(self, *a):
         self.engine.update_cfg("win_filter", self.win_var.get())
-    def _backend_changed(self):
-        mode = "logitech" if self.backend_var.get() == "罗技驱动DLL" else "sendinput"
-        self.engine.update_cfg("backend", mode)
-        self.engine.backend = None
-        if self.engine.running:
-            try:
-                self.engine._init_backend()
-            except Exception as e:
-                self._log(f"[鼠标] 后端切换失败：{e}")
     def _reset_params(self):
-        """一键重置：恢复通用无过冲稳定参数（不动热键/显示器/后端/类别等个人设置）"""
+        """一键重置：恢复通用检测参数（不动热键/显示器/类别等个人设置）"""
         if not messagebox.askyesno(
                 "重置参数",
-                "将检测/跟随调参重置为通用稳定值：\n"
-                "任何设备、任何刷新率下都不会出现过冲与摇晃。\n\n"
-                "不会改动：热键、显示器、后端、防截屏、准星偏移、\n"
+                "将检测调参重置为通用稳定值。\n\n"
+                "不会改动：热键、显示器、防截屏、准星偏移、\n"
                 "捕获区域、已选类别。\n\n继续？"):
             return
         for key, val in cfg.RESET_PARAMS.items():
             self.engine.update_cfg(key, val)
         # 同步UI控件显示（捕获区域不属于重置范围——它与模型训练尺度绑定）
         self.conf_var.set(float(cfg.RESET_PARAMS["conf"]))
-        self.strategy_var.set(cfg.RESET_PARAMS["strategy"])
+        if hasattr(self, "strategy_var"):
+            self.strategy_var.set(cfg.RESET_PARAMS["strategy"])
         for key, val in cfg.RESET_PARAMS.items():
             if key in self._param_vars and isinstance(val, (int, float)) \
                     and not isinstance(val, bool):
                 self._param_vars[key].set(float(val))
-        self._log("[参数] 已重置为通用稳定参数（无过冲）：conf=0.5 ratio=0.45 "
-                  "deadzone=2.0 cam_g=2.5 FOV=0 延迟补偿=自动（捕获区域保持不变）")
+        self._log("[参数] 已重置为通用稳定参数：conf=0.5 nms_iou=0.45 detect_fps=240 "
+                  "策略=最近中心 FOV=0 判定=15 Y偏移=0 速度=1.0 死区=2（捕获区域保持不变）")
     def _toggle_run(self):
         if not self.engine.running:
             self.btn_start.configure(text="■ 停止推理", bg="#c0392b", activebackground="#d64535")

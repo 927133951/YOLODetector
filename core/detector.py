@@ -222,18 +222,16 @@ class Detector:
                             pipeline.blob_ptr)
         self._io.bind_output(self._out_name)   # CPU输出：推理引擎内部完成D2H
         self._gpu_io_ready = True
-    def infer_gpu(self, pipeline, do_stage=True):
+    def infer_gpu(self, pipeline):
         """零拷贝推理：管线纹理 -> NVRTC预处理(blob显存) -> TRT IOBinding -> 解码
-        do_stage=False时跳过纹理映射/预处理（重复推理帧纹理未变，blob内容不变，
-        直接复用显存blob——省去每帧0.5ms的map/拷贝/内核/同步往返）"""
+        仅在画面更新(新帧)时调用——重复帧由引擎直接复用上次结果，不再进本函数"""
         t0 = time.perf_counter()
         if not getattr(self, "_gpu_io_ready", False):
             self._setup_gpu_io(pipeline)
         seg = self.seg
-        if do_stage:
-            ts = time.perf_counter()
-            pipeline.stage()             # Map/线性化/预处理内核/同步 -> blob就绪
-            seg["stage"] = 0.9 * seg["stage"] + 0.1 * (time.perf_counter() - ts) * 1000
+        ts = time.perf_counter()
+        pipeline.stage()             # Map/线性化/预处理内核/同步 -> blob就绪
+        seg["stage"] = 0.9 * seg["stage"] + 0.1 * (time.perf_counter() - ts) * 1000
         tr = time.perf_counter()
         self.sess.run_with_iobinding(self._io)
         seg["run"] = 0.9 * seg["run"] + 0.1 * (time.perf_counter() - tr) * 1000

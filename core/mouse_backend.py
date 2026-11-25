@@ -24,6 +24,8 @@ class SendInputBackend:
         class INPUT(ctypes.Structure):
             _fields_ = [("type", wintypes.DWORD), ("union", _INPUTUNION)]
         self.MOUSEEVENTF_MOVE = 0x0001
+        self.MOUSEEVENTF_ABSOLUTE = 0x8000
+        self.MOUSEEVENTF_VIRTUALDESK = 0x4000
         self.INPUT_MOUSE = 0
         self.INPUT = INPUT
         self.size = ctypes.sizeof(INPUT)
@@ -82,6 +84,21 @@ class SendInputBackend:
             pass
     def move(self, dx, dy):
         self._raw_send(int(dx), int(dy))
+    def move_abs(self, x, y):
+        """AimYolo原生绝对移动（z_ctypes.py同款）：光标直接定位到虚拟屏幕坐标(x,y)。
+        MOUSEEVENTF_ABSOLUTE按65535归一化；加VIRTUALDESK以整个虚拟桌面为归一化基准
+        （捕获region的left/top是虚拟屏幕坐标，不加此标志只对主屏正确）"""
+        vx = int(user32.GetSystemMetrics(76))    # SM_XVIRTUALSCREEN
+        vy = int(user32.GetSystemMetrics(77))    # SM_YVIRTUALSCREEN
+        vw = max(1, int(user32.GetSystemMetrics(78)))   # SM_CXVIRTUALSCREEN
+        vh = max(1, int(user32.GetSystemMetrics(79)))   # SM_CYVIRTUALSCREEN
+        inp = self.INPUT()
+        inp.type = self.INPUT_MOUSE
+        inp.union.mi.dx = int((x - vx) * 65535 / vw)
+        inp.union.mi.dy = int((y - vy) * 65535 / vh)
+        inp.union.mi.dwFlags = (self.MOUSEEVENTF_MOVE | self.MOUSEEVENTF_ABSOLUTE
+                                | self.MOUSEEVENTF_VIRTUALDESK)
+        user32.SendInput(1, ctypes.byref(inp), self.size)
 class LogitechBackend:
     """罗技驱动DLL后端（MouseControl.dll 驱动级相对移动）"""
     name = "罗技驱动"

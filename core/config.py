@@ -55,17 +55,22 @@ HOTKEY_VK.update({f"数字{i}": 0x30 + i for i in range(10)})
 HOTKEY_VK.update({chr(0x41 + i): 0x41 + i for i in range(26)})
 DEFAULTS = {
     "conf": 0.45, "capture_size": 640, "detect_fps": 240,
-    "strategy": "最近中心", "selected_classes": None,
-    "backend": "logitech", "invert_y": False, "hotkey_name": "鼠标侧键X2",
+    "selected_classes": None,
+    "hotkey_name": "鼠标侧键X2",
     "vk": 0x06, "panic_name": "End", "panic_vk": 0x23,
-    "deadzone": 2.0, "lock_radius": 15.0,
-    "aim_offset_y": 0.0, "fov_radius": 0.0,
-    "cam_g": 2.5, "aim_ratio": 0.45,
-    "gain_est_saved": 0.0,   # 上次会话在线标定的收敛增益（0=无有效值，热启动跳过收敛期）
     "aim_enable_name": "F8", "aim_enable_vk": 0x77,
     "nms_iou": 0.45, "crosshair_dx": 0, "crosshair_dy": 0,
     "monitor": None, "win_filter": "", "anti_capture": True,
-    "capture_delay_ms": -1,   # 捕获链路延迟补偿：-1=自动(1.5帧/刷新率)，≥0=手动毫秒
+    # —— AimYolo原生算法参数（含鼠标/目标策略）——
+    "strategy": "最近中心",       # 目标选择：最近中心 / 最高置信度
+    "backend": "logitech",       # 鼠标后端：logitech / sendinput
+    "invert_y": False,           # Y轴反向（相对移动路径有效）
+    "fov_radius": 0.0,           # FOV范围(px)：仅准星该半径内目标可选，0=不限
+    "lock_radius": 15.0,         # 跟随判定(px)：状态显示LOCKED阈值
+    "aim_offset_y": 0.0,         # 跟随点Y偏移：-0.5框顶 0中心 +0.5框底
+    "aim_speed": 0.3,            # 鼠标速度：<1.0=每帧走误差百分比(平滑收敛)；1.0=直满(SendInput原生)
+    "sens_k": 1.0,               # 视角增益K：鼠标动1px时目标在屏幕反向移动的px数；步长=误差/K
+    "deadzone": 2.0,             # 收尾死区(px)：距离小于该值不动
 }
 def load_settings():
     """启动时加载持久化配置（仅接受已知键，避免脏数据）"""
@@ -77,14 +82,11 @@ def load_settings():
     except Exception:
         pass
     return {}
-# 一键重置用的"通用稳定参数"：结构上防过冲（自适应增益+亚像素累加+末段减速+前馈新鲜度门控）
-# 之上的保守组合，任何设备/任何刷新率下都不会出现过冲与摇晃。
-# 注意不含 capture_size——捕获区域与模型训练尺度绑定，属于设备/模型匹配项，不参与重置
+# 一键重置用的通用稳定参数（不含 capture_size——与模型训练尺度绑定，不参与重置）
 RESET_PARAMS = {
-    "conf": 0.5, "nms_iou": 0.45, "strategy": "最近中心",
-    "aim_ratio": 0.45, "aim_offset_y": 0.0, "fov_radius": 0.0,
-    "lock_radius": 15.0, "deadzone": 2.0, "cam_g": 2.5, "detect_fps": 240,
-    "capture_delay_ms": -1,
+    "conf": 0.5, "nms_iou": 0.45, "detect_fps": 240,
+    "strategy": "最近中心", "fov_radius": 0.0, "lock_radius": 15.0,
+    "aim_offset_y": 0.0, "aim_speed": 0.3, "deadzone": 2.0, "sens_k": 1.0,
 }
 def save_settings(cfg):
     """参数变更后写入本地配置，重启自动恢复"""
