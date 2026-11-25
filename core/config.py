@@ -71,6 +71,7 @@ DEFAULTS = {
     "aim_speed": 0.3,            # 鼠标速度：<1.0=每帧走误差百分比(平滑收敛)；1.0=直满(SendInput原生)
     "sens_k": 1.0,               # 视角增益K：鼠标动1px时目标在屏幕反向移动的px数；步长=误差/K
     "deadzone": 2.0,             # 收尾死区(px)：距离小于该值不动
+    "aim_lead": 0.0,             # 移动目标预测提前(ms)：按目标速度外推瞄准点，0=关闭
 }
 def load_settings():
     """启动时加载持久化配置（仅接受已知键，避免脏数据）"""
@@ -87,6 +88,7 @@ RESET_PARAMS = {
     "conf": 0.5, "nms_iou": 0.45, "detect_fps": 240,
     "strategy": "最近中心", "fov_radius": 0.0, "lock_radius": 15.0,
     "aim_offset_y": 0.0, "aim_speed": 0.3, "deadzone": 2.0, "sens_k": 1.0,
+    "aim_lead": 0.0,
 }
 def save_settings(cfg):
     """参数变更后写入本地配置，重启自动恢复"""

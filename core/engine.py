@@ -507,10 +507,28 @@ class Engine:
                                    + ((d[1] + d[3]) / 2.0 - h_ / 2.0) ** 2)
                 # 跟随点Y偏移：-0.5=框顶 0=中心 +0.5=框底
                 off = max(-0.5, min(0.5, float(self.cfg.get("aim_offset_y", 0.0) or 0.0)))
-                bx = (best[0] + best[2]) / 2.0
-                by = best[1] + (best[3] - best[1]) * (0.5 + off)
-                self._lock_tgt = ((best[0] + best[2]) / 2.0,
-                                  (best[1] + best[3]) / 2.0)  # 迟滞用：几何中心
+                cx0 = (best[0] + best[2]) / 2.0
+                cy0 = (best[1] + best[3]) / 2.0
+                # —— 移动目标预测：锁定目标的帧间位移→速度EMA→瞄准点前移 ——
+                # 目的：消检测+画面显示固有延迟（目标横移时瞄点落后真实位置）
+                prev = getattr(self, "_lock_tgt", None)
+                lead = max(0.0, min(120.0, float(self.cfg.get("aim_lead", 0.0) or 0.0)))
+                dtf = now - getattr(self, "_lock_t", 0.0)
+                if lead > 0 and prev is not None and 0.0 < dtf < 0.5:
+                    ivx, ivy = (cx0 - prev[0]) / dtf, (cy0 - prev[1]) / dtf
+                    # 帧间速度>3000px/s=框切换/检测跳变噪声，不采纳
+                    if ivx * ivx + ivy * ivy < 3000.0 ** 2:
+                        v = getattr(self, "_tgt_v", None)
+                        a = 0.35 if v is None else 0.3    # 首帧直接采纳，其后EMA平滑
+                        self._tgt_v = (ivx, ivy) if v is None else (
+                            v[0] * (1 - a) + ivx * a, v[1] * (1 - a) + ivy * a)
+                else:
+                    self._tgt_v = None   # 目标刚切换/间隔超时：速度清零重建
+                self._lock_t = now
+                vx, vy = getattr(self, "_tgt_v", None) or (0.0, 0.0)
+                bx = cx0 + vx * lead / 1000.0
+                by = cy0 + vy * lead / 1000.0 + (best[3] - best[1]) * off
+                self._lock_tgt = (cx0, cy0)  # 迟滞用：几何中心
                 ex, ey = bx - w_ / 2.0, by - h_ / 2.0
                 dist = (ex * ex + ey * ey) ** 0.5
                 self.target_err = dist
