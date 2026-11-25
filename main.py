@@ -161,6 +161,17 @@ def main():
     engine = Engine(log_fn=print)
     app = App(root, engine)
     root.protocol("WM_DELETE_WINDOW", app.on_close)
+    # 窗口宽/高按界面实际内容自适应：固定尺寸在不同DPI缩放/字体度量下会裁掉内容
+    root.update_idletasks()
+    try:
+        req_h = app.body.winfo_reqheight() + 90   # 90≈日志区与外边距余量
+        nh = min(max(_h, req_h), _avail_h - 16)
+        req_w = app.body.winfo_reqwidth() + 45    # 45≈纵向滚动条与左右边距余量
+        nw = min(max(_w, req_w), _avail_w - 16)
+        if nh != _h or nw != _w:
+            root.geometry(f"{nw}x{nh}+{root.winfo_x()}+{root.winfo_y()}")
+    except Exception:
+        pass
     print("[启动] 系统就绪，点击「开始推理」运行实时检测")
     root.mainloop()
 if __name__ == "__main__":

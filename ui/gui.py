@@ -210,6 +210,14 @@ class App:
     def _panel(self):
         return tk.Frame(self.body, bg=self.panel, highlightthickness=1,
                         highlightbackground="#2a2f3a")
+    def _set_model_label(self, text, fg=None):
+        """模型行文本：超长截断显示，防止把「选择模型」按钮挤出可视区"""
+        if len(text) > 80:
+            text = text[:46] + "..." + text[-28:]
+        kw = {"text": text}
+        if fg:
+            kw["fg"] = fg
+        self.lbl_model.configure(**kw)
     def _build_ui(self):
         pad = {"padx": 14, "pady": 3}
         head = tk.Frame(self.body, bg=self.bg)
@@ -219,6 +227,7 @@ class App:
         # —— 模型与检测参数 ——
         p1 = self._panel()
         p1.pack(fill="x", padx=14, pady=4)
+        p1.columnconfigure(1, weight=1)  # 文本列弹性伸缩，保证右侧按钮不被挤出
         self.lbl_model = tk.Label(p1, text="模型：加载中...", bg=self.panel, fg=self.dim,
                                   font=("Microsoft YaHei UI", 9), anchor="w")
         self.lbl_model.grid(row=0, column=0, columnspan=2, sticky="we", **pad)
@@ -486,15 +495,18 @@ class App:
         stat = tk.Frame(p5, bg=self.panel)
         stat.pack(fill="x", padx=14, pady=(0, 10))
         self.status_vars = {}
+        self.status_labels = {}
         for i, name in enumerate(("状态", "设备", "帧率", "耗时", "检测", "捕获", "跟随", "持续", "运行")):
             box = tk.Frame(stat, bg=self.panel)
             box.grid(row=0, column=i, padx=(0, 10), sticky="w")
             tk.Label(box, text=name, bg=self.panel, fg=self.dim,
                      font=("Microsoft YaHei UI", 9)).pack(anchor="w")
             var = tk.StringVar(value="-")
-            tk.Label(box, textvariable=var, bg=self.panel, fg=self.green,
-                     font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w")
+            val_lbl = tk.Label(box, textvariable=var, bg=self.panel, fg=self.green,
+                               font=("Microsoft YaHei UI", 10, "bold"))
+            val_lbl.pack(anchor="w")
             self.status_vars[name] = var
+            self.status_labels[name] = val_lbl
         self.log_text = tk.Text(self.body, height=4, bg="#101216", fg="#9adfbf",
                                 insertbackground=self.fg, relief="flat", bd=0,
                                 font=("Microsoft YaHei UI", 9), state="disabled")
@@ -583,7 +595,7 @@ class App:
             return
         self.class_built = True
         family = self.engine.model_info.get("family", "未知")
-        self.lbl_model.configure(text=f"模型：{family}，共{len(names)}类", fg=self.green)
+        self._set_model_label(f"模型：{family}，共{len(names)}类", self.green)
         self._log(f"[类别] 模型版本：{family}")
         # 检测区域自动匹配模型输入尺寸（模型按该尺度训练）
         size = int(getattr(self.engine.detector, "input_size", 0) or 640)
@@ -621,7 +633,7 @@ class App:
         self.class_built = False
         self.class_widgets = {}
         self.class_canvas.delete("all")
-        self.lbl_model.configure(text=f"模型：加载中 {os.path.basename(path)}...", fg=self.dim)
+        self._set_model_label(f"模型：加载中 {os.path.basename(path)}...", self.dim)
         self._log(f"[模型] 正在加载：{path}")
         self.engine.load_model(path)
     def _set_all_classes(self, on):
@@ -765,6 +777,11 @@ class App:
             want = "disabled" if run else ("normal" if w is self.btn_model else "readonly")
             if str(w.cget("state")) != want:
                 w.configure(state=want)
+    def _status_color(self, name, warn):
+        """状态栏单项着色：warn=True 标红，否则恢复绿色"""
+        lbl = self.status_labels.get(name)
+        if lbl is not None and lbl.winfo_exists():
+            lbl.configure(fg="#e74c3c" if warn else self.green)
     def _poll_status(self):
         try:
             # 后台线程日志入队显示
@@ -789,7 +806,7 @@ class App:
                                              bg="#0078d4", activebackground="#1084e8")
             if not self.class_built and self.engine.detector_ready:
                 if self.engine.model_error:
-                    self.lbl_model.configure(text=f"模型加载失败：{self.engine.model_error}", fg="#e74c3c")
+                    self._set_model_label(f"模型加载失败：{self.engine.model_error}", "#e74c3c")
                 else:
                     self._build_class_panel()
             s = self.engine.get_status()
@@ -801,6 +818,10 @@ class App:
             self.status_vars["帧率"].set(
                 f"{s['fps']:.0f} FPS (上限{s['refresh_hz']}Hz)" if s["fps"] > 0 else "-")
             self.status_vars["耗时"].set(f"{s['infer_ms']:.1f} ms" if s["infer_ms"] > 0 else "-")
+            # 异常醒目：运行中帧率<60 或 单帧耗时>10ms 标红
+            run = self.engine.running
+            self._status_color("帧率", run and 0 < s["fps"] < 60)
+            self._status_color("耗时", run and s["infer_ms"] > 10.0)
             self.status_vars["检测"].set(str(s["num_dets"]) if self.engine.running else "-")
             self.status_vars["捕获"].set(s["capture_mode"])
             if self.engine.running:
