@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """主界面：深色主题 tkinter 控制面板（CCTools），含防截屏开关、准星偏移、持久化参数"""
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 import os
 import time
 import queue
 import ctypes
+import threading
 import core.config as cfg
 from core import capture_guard
 from core.mouse_backend import key_pressed
@@ -83,9 +84,8 @@ PARAM_TIPS = {
               "（此时K=游戏真实增益，一步到位零过冲）；\n"
               "反向过冲甩=K偏小→调大；吸附缓慢=K偏大→调小。\n"
               "K调不准时把鼠标速度调回0.3，平滑兜底。",
-    "aim_lead": "预测提前(ms)：按目标移动速度外推瞄准点，抵消检测/画面固有延迟的滞后。\n"
-                "0=关闭。目标横向快速移动时瞄点跟不上→逐步加大(30~80)；\n"
-                "目标静止时瞄点抖动→调小。跟随效果已足够就不用开。",
+    "trigger_delay_ms": "触发点击间隔(ms)：准星在目标框内时自动开枪的连发间隔。\n"
+                        "越小连发越快；配合武器射速调整。",
 }
 TIP_CONF = ("置信度阈值：检测结果的把握程度门槛(0.1~0.9)。\n"
             "越高→只选有把握的目标(误检少、可能漏检)；越低→检出更多(易误检、易跳目标)。\n"
@@ -96,6 +96,11 @@ TIP_MON = "选择游戏所在显示器。多显示器必须选对，否则检测
 TIP_OFFSET = ("准星偏移：游戏准星不在屏幕正中心时的手动补偿。X右正左负、Y下正上负(像素)。\n"
               "判断：开启预览后，绿色十字与游戏准星不重合就调这两个值。")
 TIP_ANTI = "防截屏：让本窗口对微信/QQ/OBS等截图、录屏软件不可见，不影响游戏。"
+TIP_TRIGGER = ("触发辅助（自动开枪）：勾选启用后，按住触发键时准星进入\n"
+               "所选类别目标框内即自动点击左键开枪。\n"
+               "连发间隔在下方参数区「触发间隔」调节；目标框判定有3px容差。\n"
+               "跟随辅助总开关关闭时，触发辅助一并停用。\n"
+               "注意：不要与跟随触发热键设成同一个键。")
 TIP_HOTKEY = ("触发热键：按住该键时启用跟随辅助。\n"
               "可选预设键，或选'自定义'输入VK码(十进制，可查虚拟键码表)。")
 TIP_PANIC = "紧急停止：推理中按下立即停止全部鼠标控制。\n失控时的保底手段，建议保持End。"
@@ -449,6 +454,27 @@ class App:
         self.aevk_entry.bind("<KeyRelease>", self._aevk_typed)
         tk.Label(af, text="按下切换跟随辅助开/关（信息显示在日志与状态栏）", bg=self.panel, fg=self.dim,
                  font=("Microsoft YaHei UI", 9)).pack(side="left", padx=(12, 0))
+        # —— 触发辅助（自动开枪）——
+        tg_lbl = tk.Label(p4, text="触发辅助", bg=self.panel, fg=self.fg,
+                          font=("Microsoft YaHei UI", 10))
+        tg_lbl.grid(row=5, column=0, sticky="w", **pad)
+        self._tip(tg_lbl, TIP_TRIGGER)
+        tf = tk.Frame(p4, bg=self.panel)
+        tf.grid(row=5, column=1, columnspan=3, sticky="w", **pad)
+        self.trig_var = tk.BooleanVar(value=bool(self.engine.cfg.get("trigger_enabled", False)))
+        tk.Checkbutton(tf, text="自动开枪（准星进框即点）", variable=self.trig_var,
+                       bg=self.panel, fg=self.dim, selectcolor="#22262e",
+                       activebackground=self.panel, activeforeground=self.fg,
+                       highlightthickness=0, bd=0, font=("Microsoft YaHei UI", 9),
+                       command=self._trigger_changed).pack(side="left", padx=(0, 14))
+        self.trig_hk_var = tk.StringVar(value=str(self.engine.cfg.get("trigger_name", "未设置")))
+        tg_cb = ttk.Combobox(tf, textvariable=self.trig_hk_var,
+                             values=list(cfg.HOTKEY_VK.keys()),
+                             state="readonly", width=12, font=("Microsoft YaHei UI", 9))
+        tg_cb.pack(side="left")
+        self._tip(tg_cb, "触发辅助按住键：按住时准星进入目标框自动开枪。\n"
+                         "不要与跟随触发热键设成同一个键。")
+        tg_cb.bind("<<ComboboxSelected>>", self._trigger_changed)
         win_lbl = tk.Label(p4, text="生效窗口", bg=self.panel, fg=self.fg,
                            font=("Microsoft YaHei UI", 10))
         win_lbl.grid(row=4, column=0, sticky="w", **pad)
@@ -468,11 +494,11 @@ class App:
             ("跟随点Y偏移", "aim_offset_y", -0.5, 0.5, 0.05, 0), ("鼠标速度", "aim_speed", 0.1, 1.0, 0.05, 1),
             ("收尾死区(px)", "deadzone", 1.0, 6.0, 0.5, 0),
             ("视角增益K", "sens_k", 0.5, 6.0, 0.05, 1),
-            ("预测提前(ms)", "aim_lead", 0.0, 120.0, 5.0, 0),
+            ("触发间隔(ms)", "trigger_delay_ms", 10.0, 300.0, 10.0, 1),
         )
         self._param_vars = {}
         for i, (text, key, frm, to, res, col) in enumerate(params):
-            self._param_scale(p4, 5 + i // 2, text, key, frm, to, res, col,
+            self._param_scale(p4, 6 + i // 2, text, key, frm, to, res, col,
                               PARAM_TIPS.get(key, ""))
         # —— 启动与状态 ——
         p5 = self._panel()
@@ -496,6 +522,37 @@ class App:
                                    command=self._reset_params)
         self.btn_reset.pack(side="left", padx=(10, 0))
         self._tip(self.btn_reset, TIP_RESET)
+        self.btn_cal = tk.Button(btnf, text="K自动标定", bg="#2a2f3a", fg=self.fg,
+                                 activebackground="#3a4150", activeforeground=self.fg,
+                                 relief="flat", width=14, bd=0, cursor="hand2",
+                                 font=("Microsoft YaHei UI", 11, "bold"),
+                                 command=self._calibrate_k)
+        self.btn_cal.pack(side="left", padx=(10, 0))
+        self._tip(self.btn_cal, "K自动标定：推理+预览运行中点击，程序自动小幅移动视角\n"
+                                "并测量实际增益，直接算出「视角增益K」。\n"
+                                "标定后把鼠标速度调回1.0体验一步吸附。\n"
+                                "请在游戏内画面（非菜单/静止场景）执行。")
+        # —— 配置档案 ——
+        p_pf = self._panel()
+        p_pf.pack(fill="x", padx=14, pady=4)
+        self._title_label(p_pf, "── 配置档案（按游戏保存/一键切换整套参数）").grid(
+            row=0, column=0, columnspan=4, sticky="w", **pad)
+        prf = tk.Frame(p_pf, bg=self.panel)
+        prf.grid(row=1, column=0, columnspan=4, sticky="w", **pad)
+        self.prof_var = tk.StringVar(value="")
+        self.prof_cb = ttk.Combobox(prf, textvariable=self.prof_var,
+                                    values=cfg.list_profiles(), state="readonly",
+                                    width=20, font=("Microsoft YaHei UI", 10))
+        self.prof_cb.pack(side="left")
+        self._tip(self.prof_cb, "配置档案：保存当前全部参数（含热键/类别）为命名档案，\n"
+                                "换游戏时一键载入。下拉框点击时自动刷新列表。")
+        self.prof_cb.bind("<Button-1>", self._prof_refresh)
+        for text, cmd in (("保存当前", self._prof_save), ("载入", self._prof_load),
+                          ("删除", self._prof_delete)):
+            tk.Button(prf, text=text, bg="#2a2f3a", fg=self.fg,
+                      activebackground="#3a4150", activeforeground=self.fg,
+                      relief="flat", bd=0, width=8, cursor="hand2",
+                      font=("Microsoft YaHei UI", 9), command=cmd).pack(side="left", padx=(8, 0))
         stat = tk.Frame(p5, bg=self.panel)
         stat.pack(fill="x", padx=14, pady=(0, 10))
         self.status_vars = {}
@@ -736,6 +793,97 @@ class App:
         self.engine.update_cfg("aim_enable_vk", vk)
     def _win_changed(self, *a):
         self.engine.update_cfg("win_filter", self.win_var.get())
+    def _calibrate_k(self):
+        if not self.engine.running:
+            self._log("[标定] 请先开始推理并开启预览，进入游戏画面后再标定")
+            return
+        self.btn_cal.configure(state="disabled")
+        def done(k):
+            try:
+                self.btn_cal.configure(state="normal")
+                if k is not None:
+                    self._param_vars["sens_k"].set(float(k))
+            except Exception:
+                pass
+        threading.Thread(target=lambda: self.engine.calibrate_sens_k(on_done=done),
+                         daemon=True).start()
+    def _trigger_changed(self, *a):
+        name = self.trig_hk_var.get()
+        vk = int(cfg.HOTKEY_VK.get(name, 0) or 0)
+        self.engine.update_cfg("trigger_enabled", bool(self.trig_var.get()))
+        self.engine.update_cfg("trigger_name", name)
+        self.engine.update_cfg("trigger_vk", vk)
+        self._log("[触发] 自动开枪{} · 触发键={}".format(
+            "启用" if self.trig_var.get() else "停用", name))
+    def _prof_refresh(self, *a):
+        self.prof_cb.configure(values=cfg.list_profiles())
+    def _prof_save(self):
+        name = simpledialog.askstring("保存档案", "档案名称：",
+                                      initialvalue=self.prof_var.get() or "",
+                                      parent=self.root)
+        if not name or not name.strip():
+            return
+        name = name.strip()
+        try:
+            self.engine.save_profile(name)
+            self.prof_var.set(name)
+            self._prof_refresh()
+        except Exception as e:
+            messagebox.showerror("保存档案", f"保存失败：{e}")
+    def _prof_load(self):
+        name = self.prof_var.get()
+        if not name:
+            self._log("[档案] 请先在下拉框选择档案")
+            return
+        if self.engine.apply_profile(name):
+            self._sync_ui_from_cfg()
+    def _prof_delete(self):
+        name = self.prof_var.get()
+        if not name:
+            self._log("[档案] 请先在下拉框选择档案")
+            return
+        if messagebox.askyesno("删除档案", f"确定删除档案「{name}」？"):
+            self.engine.delete_profile(name)
+            self.prof_var.set("")
+            self._prof_refresh()
+    def _sync_ui_from_cfg(self):
+        """档案载入后把全部控件同步为engine.cfg当前值"""
+        c = self.engine.cfg
+        try:
+            self.conf_var.set(float(c.get("conf", 0.45)))
+            if hasattr(self, "strategy_var"):
+                self.strategy_var.set(str(c.get("strategy", "最近中心")))
+            self.backend_var.set(str(c.get("backend", "logitech")))
+            self.inv_var.set(bool(c.get("invert_y", False)))
+            self.anti_var.set(bool(c.get("anti_capture", True)))
+            self.win_var.set(str(c.get("win_filter", "") or ""))
+            self.hotkey_var.set(str(c.get("hotkey_name", "鼠标侧键X2")))
+            self.vk_entry.delete(0, "end")
+            self.vk_entry.insert(0, str(int(c.get("vk", 6))))
+            self.panic_var.set(str(c.get("panic_name", "End")))
+            self.aen_var.set(str(c.get("aim_enable_name", "F8")))
+            self.aevk_entry.delete(0, "end")
+            self.aevk_entry.insert(0, str(int(c.get("aim_enable_vk", 0x77))))
+            self.trig_var.set(bool(c.get("trigger_enabled", False)))
+            self.trig_hk_var.set(str(c.get("trigger_name", "未设置")))
+            self.dx_var.set(int(c.get("crosshair_dx", 0)))
+            self.dy_var.set(int(c.get("crosshair_dy", 0)))
+            size0 = int(c.get("capture_size", 640))
+            self.capsize_var.set(str(size0))
+            self.cap_text.set(f"屏幕中心 {size0}×{size0}")
+            cur = c.get("monitor")
+            if cur in self.mon_devs:
+                self.mon_var.set(self.mon_names[self.mon_devs.index(cur)])
+            else:
+                self.mon_var.set(self.mon_names[0])
+            for key, val in c.items():
+                if key in self._param_vars:
+                    try:
+                        self._param_vars[key].set(float(val))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
     def _reset_params(self):
         """一键重置：恢复通用检测参数（不动热键/显示器/类别等个人设置）"""
         if not messagebox.askyesno(

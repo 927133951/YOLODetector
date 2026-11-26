@@ -6,7 +6,8 @@ import ctypes
 import threading
 import cv2
 import numpy as np
-from core.config import MODEL_PATH, LOGITECH_DLL, DEFAULTS, load_settings, save_settings
+from core.config import (MODEL_PATH, LOGITECH_DLL, DEFAULTS, load_settings,
+                         save_settings, load_profile, save_profile, delete_profile)
 from core.capture import ScreenCapture, list_monitors
 from core import capture_guard
 from core.detector import Detector
@@ -67,6 +68,7 @@ def _query_refresh_hz(monitor=None):
         return hz if hz > 1 else 60
     except Exception:
         return 60
+
 class Engine:
     def __init__(self, log_fn=print):
         self.log = log_fn
@@ -94,6 +96,9 @@ class Engine:
         self._save_timer = None  # 配置防抖落盘定时器
         self.aim_enabled = True  # 跟随辅助总开关（快捷键toggle切换）
         self._aim_vk_prev = False
+        self._trig_active = False  # 触发辅助连发状态
+        self._trig_last = 0.0
+        self._calibrating = False  # K自动标定进行中（暂停跟随移动）
         self._cap_tried = set()  # 本轮推理已尝试的捕获方式（异常时自动互切）
         self.threads = []
         self.preview_thread = None
@@ -478,7 +483,8 @@ class Engine:
             avk = int(self.cfg.get("vk", 0x06) or 0)
             aiming = (bool(avk) and self.aim_enabled
                       and key_pressed(avk)
-                      and self._window_ok())
+                      and self._window_ok()
+                      and not self._calibrating)
             if dets:
                 fov = float(self.cfg.get("fov_radius", 0.0) or 0.0)
                 if fov > 0:
@@ -507,28 +513,10 @@ class Engine:
                                    + ((d[1] + d[3]) / 2.0 - h_ / 2.0) ** 2)
                 # 跟随点Y偏移：-0.5=框顶 0=中心 +0.5=框底
                 off = max(-0.5, min(0.5, float(self.cfg.get("aim_offset_y", 0.0) or 0.0)))
-                cx0 = (best[0] + best[2]) / 2.0
-                cy0 = (best[1] + best[3]) / 2.0
-                # —— 移动目标预测：锁定目标的帧间位移→速度EMA→瞄准点前移 ——
-                # 目的：消检测+画面显示固有延迟（目标横移时瞄点落后真实位置）
-                prev = getattr(self, "_lock_tgt", None)
-                lead = max(0.0, min(120.0, float(self.cfg.get("aim_lead", 0.0) or 0.0)))
-                dtf = now - getattr(self, "_lock_t", 0.0)
-                if lead > 0 and prev is not None and 0.0 < dtf < 0.5:
-                    ivx, ivy = (cx0 - prev[0]) / dtf, (cy0 - prev[1]) / dtf
-                    # 帧间速度>3000px/s=框切换/检测跳变噪声，不采纳
-                    if ivx * ivx + ivy * ivy < 3000.0 ** 2:
-                        v = getattr(self, "_tgt_v", None)
-                        a = 0.35 if v is None else 0.3    # 首帧直接采纳，其后EMA平滑
-                        self._tgt_v = (ivx, ivy) if v is None else (
-                            v[0] * (1 - a) + ivx * a, v[1] * (1 - a) + ivy * a)
-                else:
-                    self._tgt_v = None   # 目标刚切换/间隔超时：速度清零重建
-                self._lock_t = now
-                vx, vy = getattr(self, "_tgt_v", None) or (0.0, 0.0)
-                bx = cx0 + vx * lead / 1000.0
-                by = cy0 + vy * lead / 1000.0 + (best[3] - best[1]) * off
-                self._lock_tgt = (cx0, cy0)  # 迟滞用：几何中心
+                bx = (best[0] + best[2]) / 2.0
+                by = best[1] + (best[3] - best[1]) * (0.5 + off)
+                self._lock_tgt = ((best[0] + best[2]) / 2.0,
+                                  (best[1] + best[3]) / 2.0)  # 迟滞用：几何中心
                 ex, ey = bx - w_ / 2.0, by - h_ / 2.0
                 dist = (ex * ex + ey * ey) ** 0.5
                 self.target_err = dist
@@ -594,6 +582,98 @@ class Engine:
         if wait > 0:
             time.sleep(wait)
 
+    def calibrate_sens_k(self, on_done=None):
+        """K值自动标定：推理+预览运行中，向右发一次固定200px鼠标位移，
+        相位相关测量两帧场景偏移量 → K=偏移px/200。后台线程执行。"""
+        if not self.running or self.backend is None:
+            self.log("[标定] 需推理运行中：先开始推理并开启预览，进入游戏画面后再标定")
+            if on_done:
+                on_done(None)
+            return
+        if not self.preview_on or self.frame is None:
+            self.log("[标定] 请先开启预览（标定需要读取预览帧）再点击标定")
+            if on_done:
+                on_done(None)
+            return
+        if self._calibrating:
+            return
+        self._calibrating = True   # 标定期间暂停跟随移动，避免干扰测量
+        self.log("[标定] 开始：过程中视角会自动小幅移动，请保持游戏画面静止…")
+        def work():
+            try:
+                k = self._calib_measure()
+                if k is not None:
+                    raw = k
+                    k = round(max(0.5, min(6.0, k)), 2)
+                    self.update_cfg("sens_k", k)
+                    tip = f"（原始测量{raw:.2f}，超出滑条范围已截断）" if raw != k else ""
+                    self.log(f"[标定] 完成：视角增益K={k:.2f} {tip}"
+                             "——鼠标速度建议调回1.0体验一步吸附")
+                if on_done:
+                    on_done(k)
+            except Exception as e:
+                self.log(f"[标定] 失败：{e}")
+                if on_done:
+                    on_done(None)
+            finally:
+                self._calibrating = False
+        threading.Thread(target=work, daemon=True).start()
+    def _grab_frame_copy(self):
+        with self.lock:
+            return self.frame.copy() if self.frame is not None else None
+    def _calib_measure(self):
+        """3次采样取中位数：移鼠标200px → 120ms后取帧 → phaseCorrelate测场景横向偏移"""
+        samples = []
+        for _ in range(3):
+            fA = self._grab_frame_copy()
+            if fA is None:
+                raise RuntimeError("预览帧不可用")
+            self.backend.move(200, 0)
+            time.sleep(0.12)   # 等游戏渲染出移动后的画面（≥2帧@60Hz）
+            fB = self._grab_frame_copy()
+            if fB is None:
+                raise RuntimeError("预览帧不可用")
+            gA = cv2.cvtColor(fA, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            gB = cv2.cvtColor(fB, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            h, w = gA.shape
+            m = int(min(h, w) * 0.2)   # 裁中心60%：边缘HUD/黑边不参与相关
+            gA, gB = gA[m:h - m, m:w - m], gB[m:h - m, m:w - m]
+            (sx, sy), resp = cv2.phaseCorrelate(gB, gA)
+            if resp < 0.15 or abs(sx) < 1.0:
+                raise RuntimeError("场景无明显变化——请在游戏内（非菜单/静止画面）标定")
+            samples.append(abs(sx) / 200.0)
+            time.sleep(0.08)
+        samples.sort()
+        return samples[1]
+    def apply_profile(self, name):
+        """载入配置档案：档案内已知键全部覆盖当前cfg并落盘"""
+        data = load_profile(name)
+        if not data:
+            self.log(f"[档案] 档案不存在：{name}")
+            return False
+        with self.lock:
+            for k, v in data.items():
+                if k in DEFAULTS:
+                    if k == "selected_classes" and isinstance(v, list):
+                        v = set(int(i) for i in v)
+                    self.cfg[k] = v
+            det = self.detector
+        if det is not None:
+            det.conf = float(self.cfg.get("conf", 0.45))
+            det.nms_iou = float(self.cfg.get("nms_iou", 0.45))
+        self._save()
+        self.log(f"[档案] 已载入：{name}")
+        return True
+    def save_profile(self, name):
+        with self.lock:
+            snap = {k: (sorted(v) if isinstance(v, set) else v)
+                    for k, v in self.cfg.items() if k in DEFAULTS}
+        save_profile(name, snap)
+        self.log(f"[档案] 已保存：{name}")
+    def delete_profile(self, name):
+        delete_profile(name)
+        self.log(f"[档案] 已删除：{name}")
+
     def _control_worker(self):
         """辅助热键线程：紧急停止/跟随开关/预览显隐（跟随发射已并入检测帧循环）"""
         self._boost_current_thread(pin=1)
@@ -621,6 +701,37 @@ class Engine:
                 self._aim_vk_prev = pa
             else:
                 self._aim_vk_prev = False
+            # —— 触发辅助（自动开枪）：按住触发键 + 准星(区域中心)落在所选
+            #    类别目标框内 → 自动左键点击；间隔=触发间隔参数 ——
+            with self.lock:
+                tg_on = bool(self.cfg.get("trigger_enabled"))
+                tvk = int(self.cfg.get("trigger_vk", 0) or 0)
+                tdel = max(0.01, float(self.cfg.get("trigger_delay_ms", 50)) / 1000.0)
+                # 受跟随辅助总开关(aim_enabled)联动：总开关关闭=触发辅助一并停用
+                tg_boxes = list(self.boxes) if (tg_on and tvk and self.backend
+                                                and self.aim_enabled) else None
+                tg_region = (self.region.get("width", 0), self.region.get("height", 0))
+            fired = False
+            if tg_on and tvk and key_pressed(tvk) and tg_boxes and tg_region[0]:
+                sel = self.cfg.get("selected_classes")
+                cx, cy = tg_region[0] / 2.0, tg_region[1] / 2.0
+                for b in tg_boxes:
+                    if sel is not None and b[5] not in sel:
+                        continue
+                    if b[0] - 3 <= cx <= b[2] + 3 and b[1] - 3 <= cy <= b[3] + 3:
+                        fired = True
+                        break
+            if fired and (not self._trig_active
+                          or time.perf_counter() - self._trig_last >= tdel):
+                try:
+                    self.backend.click_down()
+                    time.sleep(0.02)
+                    self.backend.click_up()
+                except Exception as e:
+                    if time.perf_counter() - self._trig_last > 2.0:
+                        self.log(f"[触发] 点击失败：{e}")
+                self._trig_last = time.perf_counter()
+            self._trig_active = fired
             # —— 预览窗口显隐切换键（边沿触发，固定Tab；仅预览开启时轮询）——
             if self.preview_on:
                 hp = key_pressed(0x09)   # VK_TAB

@@ -24,6 +24,8 @@ class SendInputBackend:
         class INPUT(ctypes.Structure):
             _fields_ = [("type", wintypes.DWORD), ("union", _INPUTUNION)]
         self.MOUSEEVENTF_MOVE = 0x0001
+        self.MOUSEEVENTF_LEFTDOWN = 0x0002
+        self.MOUSEEVENTF_LEFTUP = 0x0004
         self.MOUSEEVENTF_ABSOLUTE = 0x8000
         self.MOUSEEVENTF_VIRTUALDESK = 0x4000
         self.INPUT_MOUSE = 0
@@ -99,6 +101,31 @@ class SendInputBackend:
         inp.union.mi.dwFlags = (self.MOUSEEVENTF_MOVE | self.MOUSEEVENTF_ABSOLUTE
                                 | self.MOUSEEVENTF_VIRTUALDESK)
         user32.SendInput(1, ctypes.byref(inp), self.size)
+    def click_down(self):
+        inp = self.INPUT()
+        inp.type = self.INPUT_MOUSE
+        inp.union.mi.dwFlags = self.MOUSEEVENTF_LEFTDOWN
+        user32.SendInput(1, ctypes.byref(inp), self.size)
+    def click_up(self):
+        inp = self.INPUT()
+        inp.type = self.INPUT_MOUSE
+        inp.union.mi.dwFlags = self.MOUSEEVENTF_LEFTUP
+        user32.SendInput(1, ctypes.byref(inp), self.size)
+
+def _si_click(down):
+    """SendInput 左键点击（罗技DLL无按键导出时的兜底路径）"""
+    class MOUSEINPUT(ctypes.Structure):
+        _fields_ = [("dx", wintypes.LONG), ("dy", wintypes.LONG),
+                    ("mouseData", wintypes.DWORD), ("dwFlags", wintypes.DWORD),
+                    ("time", wintypes.DWORD), ("dwExtraInfo", ctypes.c_size_t)]
+    class _U(ctypes.Union):
+        _fields_ = [("mi", MOUSEINPUT)]
+    class INPUT(ctypes.Structure):
+        _fields_ = [("type", wintypes.DWORD), ("union", _U)]
+    inp = INPUT()
+    inp.type = 0
+    inp.union.mi.dwFlags = 0x0002 if down else 0x0004
+    user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
 class LogitechBackend:
     """罗技驱动DLL后端（MouseControl.dll 驱动级相对移动）"""
     name = "罗技驱动"
@@ -106,9 +133,27 @@ class LogitechBackend:
         self.dll = ctypes.CDLL(dll_path)
         self.dll.move_R.argtypes = [ctypes.c_int, ctypes.c_int]
         self.dll.move_R.restype = None
-        print("[鼠标] 罗技驱动DLL加载成功：MouseControl.dll")
+        # 按键导出可选：部分MouseControl.dll版本只有move_R，没有LButtonDown/Up
+        self._has_btn = all(hasattr(self.dll, n) for n in ("LButtonDown", "LButtonUp"))
+        if self._has_btn:
+            self.dll.LButtonDown.argtypes = []
+            self.dll.LButtonDown.restype = None
+            self.dll.LButtonUp.argtypes = []
+            self.dll.LButtonUp.restype = None
+        print("[鼠标] 罗技驱动DLL加载成功：MouseControl.dll"
+              + ("" if self._has_btn else "（无按键导出，点击走SendInput）"))
     def move(self, dx, dy):
         self.dll.move_R(int(dx), int(dy))
+    def click_down(self):
+        if self._has_btn:
+            self.dll.LButtonDown()
+        else:
+            _si_click(True)
+    def click_up(self):
+        if self._has_btn:
+            self.dll.LButtonUp()
+        else:
+            _si_click(False)
 def get_cursor_pos():
     pt = wintypes.POINT()
     user32.GetCursorPos(ctypes.byref(pt))
