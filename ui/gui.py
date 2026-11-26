@@ -160,6 +160,21 @@ class App:
             self.root.deiconify()
             self.root.lift()
             self.root.focus_force()
+            # lift/focus_force只在本应用窗口间提层：无边框游戏窗口会盖住tk窗口，
+            # 单屏用户主界面被游戏完全挡住时无法找回。系统级瞬时置顶再撤回，
+            # 保证一定显示在最上层（之后恢复正常层级）
+            try:
+                user32 = ctypes.windll.user32
+                hwnd = user32.GetParent(self.root.winfo_id())
+                if hwnd:
+                    SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW = 0x0002, 0x0001, 0x0040
+                    user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0,   # HWND_TOPMOST
+                                        SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
+                    user32.SetWindowPos(hwnd, -2, 0, 0, 0, 0,   # HWND_NOTOPMOST
+                                        SWP_NOMOVE | SWP_NOSIZE)
+                    user32.SetForegroundWindow(hwnd)
+            except Exception:
+                pass
             self._log("[窗口] 主界面已显示")
         else:
             self.root.withdraw()
