@@ -78,6 +78,10 @@ PARAM_TIPS = {
                  "多目标/头身双框跳变已由目标锁定迟滞自动抑制，无需调参。",
     "deadzone": "收尾死区(px)：距离小于该值时不再移动鼠标。\n"
                 "防止在目标附近来回抖动，一般2~3即可。",
+    "curve_strength": "曲线强度：鼠标沿弧线接近目标的弯曲程度(0~0.4)。\n"
+                      "0=直线；0.1~0.2=轻微拟人弧线；0.3以上明显弯。\n"
+                      "只弯方向不改步长——收敛速率/增益K标定语义不变，\n"
+                      "收尾阶段(<12px)自动切直线保证精确吸附。",
     "sens_k": "视角增益K：鼠标移动1像素时目标在屏幕上反向移动的像素数\n"
               "（由游戏灵敏度/FOV/分辨率共同决定）。步长=误差/K。\n"
               "调法：鼠标速度设1.0，从1.0逐步试——一步吸附不回弹即调准\n"
@@ -508,13 +512,41 @@ class App:
             ("跟随范围(px)", "fov_radius", 0.0, 300.0, 5.0, 0), ("跟随判定(px)", "lock_radius", 5.0, 40.0, 1.0, 1),
             ("跟随点Y偏移", "aim_offset_y", -0.5, 0.5, 0.05, 0), ("鼠标速度", "aim_speed", 0.1, 1.0, 0.05, 1),
             ("收尾死区(px)", "deadzone", 1.0, 6.0, 0.5, 0),
-            ("视角增益K", "sens_k", 0.5, 6.0, 0.05, 1),
-            ("触发间隔(ms)", "trigger_delay_ms", 10.0, 300.0, 10.0, 1),
+            ("视角增益K", "sens_k", 0.5, 6.0, 0.05, 0), ("触发间隔(ms)", "trigger_delay_ms", 10.0, 300.0, 10.0, 1),
         )
         self._param_vars = {}
         for i, (text, key, frm, to, res, col) in enumerate(params):
             self._param_scale(p4, 6 + i // 2, text, key, frm, to, res, col,
                               PARAM_TIPS.get(key, ""))
+        # —— 曲线平滑：开关+强度滑条同模块，关闭时隐藏滑条 ——
+        cuf = tk.Frame(p4, bg=self.panel)
+        cuf.grid(row=11, column=0, columnspan=4, sticky="w", padx=14, pady=2)
+        self.curve_var = tk.BooleanVar(value=bool(self.engine.cfg.get("curve_enabled", True)))
+        ck = tk.Checkbutton(cuf, text="曲线平滑", variable=self.curve_var,
+                            bg=self.panel, fg=self.fg, selectcolor="#22262e",
+                            activebackground=self.panel, activeforeground=self.fg,
+                            highlightthickness=0, bd=0, font=("Microsoft YaHei UI", 9),
+                            command=self._curve_changed)
+        ck.pack(side="left")
+        self._tip(ck, "曲线平滑：鼠标沿贝塞尔弧线接近目标（拟人轨迹），\n"
+                      "方向弯曲、步长不变（收敛速率/增益K标定不受影响）。\n"
+                      "开启后显示「曲线强度」滑条；关闭=直线收敛。")
+        self.cu_lbl = tk.Label(cuf, text="曲线强度", bg=self.panel, fg=self.fg,
+                               font=("Microsoft YaHei UI", 9))
+        self._cu_pad = {"side": "left", "padx": (16, 6)}
+        self.cu_lbl.pack(**self._cu_pad)
+        self.cu_var = tk.DoubleVar(value=float(self.engine.cfg.get("curve_strength", 0.18)))
+        self.cu_scale = tk.Scale(cuf, variable=self.cu_var, from_=0.0, to=0.4,
+                                 resolution=0.02, orient="horizontal", length=150,
+                                 bg=self.panel, fg=self.fg, highlightthickness=0,
+                                 troughcolor="#2a2f3a", bd=0, showvalue=True,
+                                 font=("Microsoft YaHei UI", 8),
+                                 command=lambda v: self.engine.update_cfg("curve_strength", float(v)))
+        self.cu_scale.pack(side="left", padx=(0, 6))
+        self._tip(self.cu_lbl, PARAM_TIPS["curve_strength"])
+        self._tip(self.cu_scale, PARAM_TIPS["curve_strength"])
+        self._param_vars["curve_strength"] = self.cu_var
+        self._curve_toggle()
         # —— 启动与状态 ——
         p5 = self._panel()
         p5.pack(fill="x", padx=14, pady=4)
@@ -830,6 +862,19 @@ class App:
         self.engine.update_cfg("trigger_vk", vk)
         self._log("[触发] 自动开枪{} · 触发键={}".format(
             "启用" if self.trig_var.get() else "停用", name))
+    def _curve_changed(self):
+        on = bool(self.curve_var.get())
+        self.engine.update_cfg("curve_enabled", on)
+        self._log("[跟随] 曲线平滑{}".format("开启" if on else "关闭"))
+        self._curve_toggle()
+    def _curve_toggle(self):
+        """曲线关闭时隐藏强度滑条（开关与滑条同模块联动）"""
+        if self.curve_var.get():
+            self.cu_lbl.pack(**self._cu_pad)
+            self.cu_scale.pack(side="left", padx=(0, 6))
+        else:
+            self.cu_lbl.pack_forget()
+            self.cu_scale.pack_forget()
     def _prof_refresh(self, *a):
         self.prof_cb.configure(values=cfg.list_profiles())
     def _prof_save(self):
@@ -881,6 +926,8 @@ class App:
             self.aevk_entry.insert(0, str(int(c.get("aim_enable_vk", 0x77))))
             self.trig_var.set(bool(c.get("trigger_enabled", False)))
             self.trig_hk_var.set(str(c.get("trigger_name", "未设置")))
+            self.curve_var.set(bool(c.get("curve_enabled", True)))
+            self._curve_toggle()
             self.dx_var.set(int(c.get("crosshair_dx", 0)))
             self.dy_var.set(int(c.get("crosshair_dy", 0)))
             size0 = int(c.get("capture_size", 640))

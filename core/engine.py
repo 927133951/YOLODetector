@@ -540,6 +540,35 @@ class Engine:
                             # 绝不读光标位置：raw input游戏会把OS光标推到屏幕
                             # 边缘，按它算差值=步长巨大方向错乱=吸附甩飞
                             dxm, dym = ex * spd / k_gain, ey * spd / k_gain
+                            # 曲线平滑：二次贝塞尔弧线（P0=准星, P2=瞄点, 控制点=
+                            # 中点+垂直偏移）。每帧重规划+进度按 步长/弧长 推进——
+                            # 闭环天然适应目标移动/切换；只弯方向不改步长，直线
+                            # 收敛语义（K标定/单调不过冲）完整保留
+                            stg = float(self.cfg.get("curve_strength", 0.18) or 0.0)
+                            if self.cfg.get("curve_enabled", True) and stg > 0.001 \
+                                    and dist > 12.0:
+                                ux, uy = ex / dist, ey / dist
+                                # 误差方向突变(夹角>45°)/目标切换：进度归零重起步
+                                if (ux * getattr(self, "_curve_ux", 0.0)
+                                        + uy * getattr(self, "_curve_uy", 0.0)) < 0.7:
+                                    self._curve_t = 0.0
+                                self._curve_ux, self._curve_uy = ux, uy
+                                t0 = min(max(getattr(self, "_curve_t", 0.0), 0.0), 1.0)
+                                c1x = ex * 0.5 + uy * dist * stg   # 固定手性：视觉左弯
+                                c1y = ey * 0.5 - ux * dist * stg
+                                arc = 0.5 * ((c1x * c1x + c1y * c1y) ** 0.5
+                                             + ((ex - c1x) ** 2 + (ey - c1y) ** 2) ** 0.5
+                                             + dist)   # 弧长≈(两边+弦)/2
+                                b0x = 2.0 * (1.0 - t0) * t0 * c1x + t0 * t0 * ex
+                                b0y = 2.0 * (1.0 - t0) * t0 * c1y + t0 * t0 * ey
+                                t1 = t0 + (dist * spd / k_gain) / arc
+                                if t1 >= 1.0:   # 弧走完：残余直线直达瞄点
+                                    dxm, dym = ex - b0x, ey - b0y
+                                    self._curve_t = 0.0
+                                else:           # 弧上推进：位移=B(t1)-B(t0)（切向）
+                                    dxm = 2.0 * (1.0 - t1) * t1 * c1x + t1 * t1 * ex - b0x
+                                    dym = 2.0 * (1.0 - t1) * t1 * c1y + t1 * t1 * ey - b0y
+                                    self._curve_t = t1
                             if self.cfg.get("invert_y"):
                                 dym = -dym
                             # 亚像素残差累积：每帧<1px时直接int会截成0发不出
@@ -561,6 +590,7 @@ class Engine:
             else:
                 self.lock_flag = False
                 self._lock_tgt = None  # 目标消失，下帧重新按最近中心选
+                self._curve_t = 0.0    # 曲线进度一并清零，防下次带旧进度斜切
                 self.state = ("跟随已关闭" if not self.aim_enabled
                               else "搜索目标" if aiming else "运行中")
             dt = now - self._last_tick

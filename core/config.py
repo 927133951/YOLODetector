@@ -71,6 +71,8 @@ DEFAULTS = {
     "aim_speed": 0.3,            # 鼠标速度：<1.0=每帧走误差百分比(平滑收敛)；1.0=直满(SendInput原生)
     "sens_k": 1.0,               # 视角增益K：鼠标动1px时目标在屏幕反向移动的px数；步长=误差/K
     "deadzone": 2.0,             # 收尾死区(px)：距离小于该值不动
+    "curve_enabled": True,       # 曲线平滑：鼠标沿贝塞尔弧线接近目标（拟人轨迹）
+    "curve_strength": 0.18,      # 曲线强度：弧线偏离直线的程度(0~0.4)，0=直线
     "trigger_enabled": False,    # 触发辅助（自动开枪）开关
     "trigger_name": "未设置",     # 触发辅助按键名
     "trigger_vk": 0,             # 触发辅助按键VK码
@@ -91,6 +93,7 @@ RESET_PARAMS = {
     "conf": 0.5, "nms_iou": 0.45, "detect_fps": 240,
     "strategy": "最近中心", "fov_radius": 0.0, "lock_radius": 15.0,
     "aim_offset_y": 0.0, "aim_speed": 0.3, "deadzone": 2.0, "sens_k": 1.0,
+    "curve_enabled": True, "curve_strength": 0.18,
     "trigger_delay_ms": 50.0,
 }
 def save_settings(cfg):
